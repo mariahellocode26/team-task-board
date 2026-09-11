@@ -9,7 +9,7 @@ export function JoinDialog({ open, onJoin }: { open: boolean; onJoin: (name: str
 
   return (
     <Dialog open={open}>
-      <DialogContent showCloseButton={false} className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md [&>button]:hidden">
         <form
           onSubmit={(e) => {
             e.preventDefault();
