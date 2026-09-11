@@ -76,9 +76,20 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.129 0.042 264.695);
+  --radius: 0.75rem;
+  --background: oklch(0.985 0.004 250);
+  --foreground: oklch(0.23 0.02 258);
+  --column: oklch(0.968 0.005 250);
+  --column-active: oklch(0.945 0.012 235);
+  --column-todo: oklch(0.62 0.06 250);
+  --column-progress: oklch(0.68 0.14 232);
+  --column-done: oklch(0.68 0.13 160);
+  --priority-low: oklch(0.5 0.05 245);
+  --priority-low-soft: oklch(0.94 0.01 245);
+  --priority-medium: oklch(0.52 0.13 65);
+  --priority-medium-soft: oklch(0.95 0.045 80);
+  --priority-high: oklch(0.52 0.19 20);
+  --priority-high-soft: oklch(0.95 0.035 20);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.129 0.042 264.695);
   --popover: oklch(1 0 0);
