@@ -64,14 +64,16 @@ export function TaskDialog({ open, task, defaultStatus = "todo", onOpenChange, o
       setError("Title is required");
       return;
     }
+    const description = form.description.trim();
+    const assignee = form.assignee.trim();
     onSave({
       id: task?.id ?? crypto.randomUUID(),
       title: form.title.trim(),
-      description: form.description.trim() || undefined,
-      assignee: form.assignee.trim() || undefined,
       priority: form.priority,
-      dueDate: form.dueDate || undefined,
       status: form.status,
+      ...(description ? { description } : {}),
+      ...(assignee ? { assignee } : {}),
+      ...(form.dueDate ? { dueDate: form.dueDate } : {}),
     });
     onOpenChange(false);
   };
