@@ -1,0 +1,326 @@
+openapi: 3.0.3
+
+info:
+  title: Team Kanban API
+  version: 0.1.0
+  description: |
+    The HTTP contract for the Team Kanban backend, derived from what the
+    frontend already does against its local `TaskStore` (see
+    frontend/src/lib/kanban.ts and frontend/src/hooks/use-board.ts) and from
+    docs/specs.md.
+
+    ## No authentication
+
+    Per specs.md §5.2, the MVP has no sign-up, login, password or OAuth —
+    anyone with the shared board URL may call every endpoint below. There is
+    no security scheme; `security` is empty both globally and per-operation.
+
+    ## No user/board endpoints
+
+    A team member's display name (specs.md §5.3) identifies who a task is
+    assigned to, but it is not a backend-managed account: assignee is a
+    plain free-text string on a task, not a foreign key into a users table.
+    Joining the board is a client-local action (the frontend stores the
+    display name itself); there is deliberately no `/join` or `/members`
+    endpoint here. Likewise there is exactly one board with a fixed title
+    and fixed columns (specs.md §3, §4), so there is no `/board` resource —
+    the three columns are a frontend constant, not server data.
+
+    ## Decisions made to write this file
+
+    Three questions were open before this file could be written. Each was
+    resolved by following the frontend's existing behavior as closely as
+    possible rather than inventing new product behavior:
+
+    1. **Status naming** — specs.md §27 specifies `todo` / `in_progress` /
+       `done`; the frontend's internal `ColumnId` type currently spells the
+       middle value `in-progress` (hyphen). This contract uses the spec's
+       `in_progress` on the wire; the frontend-side store adapter that talks
+       to this API will need to map between the two at the boundary.
+    2. **Reordering** — mirrors `moveTask(id, status, index)` in
+       use-board.ts exactly: a dedicated `POST /tasks/{taskId}/move` takes a
+       target column and a 0-based index, and the server renumbers that
+       column's `order` values the same way the current in-memory
+       implementation does.
+    3. **Task IDs** — the current localStorage store generates the task id
+       client-side (`crypto.randomUUID()`) because there is no round trip to
+       a server. This contract instead has the server assign `id` on
+       creation, which is the conventional REST shape; the future backend
+       `TaskStore` adapter should use the id the server returns rather than
+       generating its own.
+
+    ## Not covered here
+
+    Real-time collaboration (specs.md §14) is required by the product but
+    its transport (Server-Sent Events, WebSocket, or polling) has not been
+    decided, so no streaming/push endpoint is defined yet. This file
+    currently covers only the synchronous REST surface the frontend's
+    existing task operations need.
+
+servers:
+  - url: /api
+    description: >-
+      Same-origin API path. Assumed convention — the backend's host,
+      framework and any base-path have not been chosen yet.
+
+security: []
+
+tags:
+  - name: Tasks
+    description: The single shared board's tasks. There is no board resource to nest these under — see the "No user/board endpoints" note above.
+
+paths:
+  /tasks:
+    get:
+      operationId: listTasks
+      tags: [Tasks]
+      summary: List every task on the board
+      description: >-
+        Returns all tasks across all three columns, unordered by column —
+        the client groups by `status` and sorts by `order` itself, the same
+        way `tasksIn()` does today in use-board.ts.
+      responses:
+        "200":
+          description: The full task list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+    post:
+      operationId: createTask
+      tags: [Tasks]
+      summary: Create a task
+      description: >-
+        Matches the "Create Task" form (specs.md §9 / §21). The server
+        assigns `id` and appends the task to the end of the target column,
+        assigning `order` as the current maximum order in that column plus
+        one — the same rule `upsertTask` uses today for a brand-new task.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCreate"
+      responses:
+        "201":
+          description: The created task, including its server-assigned id and order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+
+  /tasks/{taskId}:
+    parameters:
+      - $ref: "#/components/parameters/taskId"
+    patch:
+      operationId: updateTask
+      tags: [Tasks]
+      summary: Edit a task
+      description: >-
+        Matches the "Edit Task" form (specs.md §10 / §21). Any subset of the
+        editable fields may be sent. If `status` is included and differs
+        from the task's current column, the task moves to the end of the
+        new column (order = current max in that column + 1) — the same
+        status-changed branch `upsertTask` takes today. To place a task at a
+        specific position instead of the end of a column, use the move
+        endpoint below.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskUpdate"
+      responses:
+        "200":
+          description: The updated task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteTask
+      tags: [Tasks]
+      summary: Delete a task
+      description: >-
+        Matches specs.md §11. The confirmation dialog ("Delete this task?")
+        is a frontend concern; by the time this call is made the user has
+        already confirmed.
+      responses:
+        "204":
+          description: The task was deleted.
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tasks/{taskId}/move:
+    parameters:
+      - $ref: "#/components/parameters/taskId"
+    post:
+      operationId: moveTask
+      tags: [Tasks]
+      summary: Move a task to a column and position
+      description: >-
+        Matches specs.md §12: drag-and-drop between columns (§12.1) and
+        manual reordering within a column (§12.2). `index` is the desired
+        0-based position of this task within the destination column *after*
+        the move. The server renumbers every task in that column's `order`
+        accordingly, the same way `moveTask()` does today in use-board.ts —
+        which is why this returns the full task list rather than a single
+        task: other tasks in the destination column change `order` too.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskMove"
+      responses:
+        "200":
+          description: The full task list, reflecting every order change the move caused.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  parameters:
+    taskId:
+      name: taskId
+      in: path
+      required: true
+      description: The task's id.
+      schema:
+        type: string
+
+  schemas:
+    Priority:
+      type: string
+      description: One of three fixed priorities (specs.md §8). Custom priorities are not supported.
+      enum: [low, medium, high]
+
+    Status:
+      type: string
+      description: One of the three fixed columns (specs.md §4, §27).
+      enum: [todo, in_progress, done]
+
+    Task:
+      type: object
+      description: A task as returned by the API (specs.md §27).
+      required: [id, title, priority, status, order]
+      properties:
+        id:
+          type: string
+          description: Server-assigned identifier.
+        title:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        assignee:
+          type: string
+          description: A team member's display name. Free text — not validated against any list of known members.
+        priority:
+          $ref: "#/components/schemas/Priority"
+        dueDate:
+          type: string
+          format: date
+          description: ISO 8601 date (yyyy-mm-dd). No time component.
+        status:
+          $ref: "#/components/schemas/Status"
+        order:
+          type: integer
+          description: >-
+            Position within this task's column, used to preserve manual
+            ordering (specs.md §12.2, §27). Server-assigned; not settable
+            directly by the client — use the move endpoint to change it.
+
+    TaskCreate:
+      type: object
+      description: Request body for POST /tasks. Only `title` is required (specs.md §9).
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        assignee:
+          type: string
+        priority:
+          allOf: [{ $ref: "#/components/schemas/Priority" }]
+          default: medium
+          description: Defaults to medium when omitted (specs.md §9).
+        dueDate:
+          type: string
+          format: date
+        status:
+          allOf: [{ $ref: "#/components/schemas/Status" }]
+          default: todo
+          description: The column to create the task in. Defaults to todo when omitted.
+
+    TaskUpdate:
+      type: object
+      description: >-
+        Request body for PATCH /tasks/{taskId}. Every field is optional;
+        send only what changed. At least one field must be present.
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        assignee:
+          type: string
+        priority:
+          $ref: "#/components/schemas/Priority"
+        dueDate:
+          type: string
+          format: date
+        status:
+          $ref: "#/components/schemas/Status"
+
+    TaskMove:
+      type: object
+      description: Request body for POST /tasks/{taskId}/move.
+      required: [status, index]
+      properties:
+        status:
+          $ref: "#/components/schemas/Status"
+        index:
+          type: integer
+          minimum: 0
+          description: Desired 0-based position within the destination column after the move.
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+  responses:
+    NotFound:
+      description: No task exists with that id.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: The request body failed validation (e.g. a blank title).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

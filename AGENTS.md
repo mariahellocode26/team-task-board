@@ -18,7 +18,7 @@ authority on what is in and out of scope, and it is deliberately restrictive.
 ## Repository layout
 
 ```
-/backend       backend application and its tests   (not started)
+/backend       backend application and its tests   (FastAPI, in-memory store)
 /docs          supporting documentation
 /frontend      frontend application                 (built, working)
 AGENTS.md      this file
@@ -50,7 +50,7 @@ Notable paths:
 - [frontend/src/routes/index.tsx](frontend/src/routes/index.tsx) — the board page.
 - [frontend/src/components/kanban/](frontend/src/components/kanban/) — board column, task card, task dialog, join dialog.
 - [frontend/src/components/ui/](frontend/src/components/ui/) — generated shadcn/ui primitives. Prefer composing these over hand-rolling new ones, and avoid editing them directly.
-- [frontend/src/lib/kanban.ts](frontend/src/lib/kanban.ts) — the `Task` model and the `TaskStore` storage interface.
+- [frontend/src/lib/kanban.ts](frontend/src/lib/kanban.ts) — the `Task` model, the `TaskStore` storage interface, `localTaskStore`, and `httpTaskStore`.
 - [frontend/src/hooks/use-board.ts](frontend/src/hooks/use-board.ts) — all board mutations, written against `TaskStore` rather than against a concrete store.
 
 `@/` resolves to `frontend/src/`.
@@ -70,35 +70,87 @@ The spec (§16–17) requires that the UI never depend on a storage
 implementation, so that browser storage can be swapped for a database later:
 
 ```
-Kanban UI  ->  useBoard()  ->  TaskStore  ->  localStorage (today)
+Kanban UI  ->  useBoard()  ->  TaskStore  ->  httpTaskStore -> backend/ (default, today)
+                                          ->  localTaskStore -> localStorage (fallback)
 ```
 
-`useBoard(store)` takes a `TaskStore` and defaults to `localTaskStore`. When the
-backend arrives it should land as a second `TaskStore` implementation passed into
-that same hook — not as fetch calls sprinkled through the components.
+`useBoard(store)` takes a `TaskStore` and now **defaults to `httpTaskStore`**,
+which talks to `backend/` over HTTP per [openapi.yaml](openapi.yaml). Because
+HTTP calls aren't synchronous the way `localStorage` reads/writes are,
+`TaskStore` is an async, CRUD-shaped interface (`loadTasks`, `createTask`,
+`updateTask`, `deleteTask`, `moveTask`) rather than a "load/save the whole
+array" one. `localTaskStore` still exists as an offline/fallback
+implementation of the same interface — it isn't wired up anywhere by default,
+but pass it to `useBoard(localTaskStore)` if you need the board to work
+without the backend running.
+
+`httpTaskStore` is also where the `in-progress` (frontend) / `in_progress`
+(wire, per docs/specs.md §27) naming mismatch gets mapped — see
+`TO_WIRE_STATUS`/`FROM_WIRE_STATUS` in kanban.ts. The API base URL comes from
+`VITE_API_BASE_URL` (see [frontend/.env.example](frontend/.env.example)),
+defaulting to `http://localhost:8000`.
+
+Known gap: clearing an optional field (assignee/description/due date) to
+empty in the edit modal does not clear it on the backend, because
+`TaskDialog` omits empty fields from its payload entirely instead of sending
+them as `null`. Pre-existing behavior, carried over unchanged when the store
+switched from `localStorage` to HTTP.
 
 ## Backend
 
-Not started. The stack has not been chosen yet; the spec (§36) leaves it open on
-purpose. Confirm the choice with the user before scaffolding anything here.
-Tests belong in `/backend` alongside the application.
+FastAPI, implementing [openapi.yaml](openapi.yaml). Storage is in-memory and
+seeded with sample data on startup — see [backend/README.md](backend/README.md)
+for the full design notes.
+
+```sh
+cd backend
+pip install -e ".[dev]"
+uvicorn app.main:app --reload   # docs at /docs, schema at /openapi.json
+pytest
+```
+
+Layout: `app/main.py` (app + error-shape normalization), `app/models.py`
+(Pydantic schemas mirroring openapi.yaml's components), `app/store.py` (the
+`TaskStore`, kept separate from routing so it can become a real database
+later), `app/routers/tasks.py` (the endpoints). Tests live in `backend/tests/`.
+
+**No authentication.** Every endpoint has `security: []`, matching
+docs/specs.md §5.2/§33, which explicitly exclude accounts, logins and
+passwords from the MVP. This was a deliberate decision, not an oversight — see
+"openapi.yaml" below before adding any auth.
+
+**CORS is wide open** (`allow_origins=["*"]` in `app/main.py`), on the same
+reasoning as no-auth: the board has no origin worth restricting to and no
+credentials in play. Needed because the frontend and backend run on different
+ports/origins in dev.
+
+Wired up to the frontend: `frontend/src/lib/kanban.ts`'s `httpTaskStore` is
+the default `TaskStore` `useBoard()` uses — see "The storage seam" under
+Frontend above.
 
 ## openapi.yaml
 
-The agreed HTTP contract between the two applications. It is currently **empty**
-— a deliberate placeholder. Its content has not been decided, so do not invent
-endpoints; agree them with the user first.
+The agreed HTTP contract between the two applications, implemented by
+`backend/` and matching what `frontend/`'s existing `Task`/`TaskStore` shapes
+need. Two of the three open questions this file used to block on are now
+settled and implemented:
 
-Three questions are open and must be settled before it can be written:
+1. **Status naming** — resolved. The wire format uses
+   [docs/specs.md](docs/specs.md) §27's `in_progress` (underscore).
+   [frontend/src/lib/kanban.ts](frontend/src/lib/kanban.ts)'s `ColumnId` still
+   spells it `in-progress` (hyphen) internally; `httpTaskStore` maps between
+   the two at the boundary.
+2. **Reordering** — resolved. `POST /tasks/{taskId}/move` takes a target
+   column and a 0-based index, mirroring `moveTask()` in
+   [frontend/src/hooks/use-board.ts](frontend/src/hooks/use-board.ts) exactly,
+   down to only renumbering the destination column.
 
-1. **Status naming.** [docs/specs.md](docs/specs.md) §27 specifies `in_progress`,
-   but [frontend/src/lib/kanban.ts](frontend/src/lib/kanban.ts) uses
-   `in-progress`. The wire format has to pick one, and the other side maps to it.
-2. **Real-time transport.** Spec §14 requires real-time collaboration but does
-   not say how. SSE, WebSocket and polling are all still on the table.
-3. **Reordering.** Spec §12.2 requires manual order to be preserved. How a drag
-   is expressed over the wire — a move endpoint, a client-computed `order`, or a
-   bulk per-column reorder — is undecided.
+Still open:
+
+3. **Real-time transport.** Spec §14 requires real-time collaboration but does
+   not say how. SSE, WebSocket and polling are all still on the table, and
+   openapi.yaml has no streaming endpoint yet — a client has to poll
+   `GET /tasks` for now.
 
 ## Working on this repo
 
