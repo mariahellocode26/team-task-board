@@ -5,17 +5,38 @@ Run with: uvicorn app.main:app --reload
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request, status as http_status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.database import get_sessionmaker, init_db
 from app.routers.tasks import router as tasks_router
+from app.store import seed_if_empty
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Creates the schema on first run (a no-op once it exists) and seeds
+    # sample data only if the tasks table is empty, so restarting against a
+    # database that already has real data never re-adds the seed rows.
+    init_db()
+    session = get_sessionmaker()()
+    try:
+        seed_if_empty(session)
+    finally:
+        session.close()
+    yield
+
 
 app = FastAPI(
     title="Team Kanban API",
     version="0.1.0",
     description="Implements openapi.yaml at the repository root.",
+    lifespan=lifespan,
 )
 
 # Wide open by design: docs/specs.md §5.2 makes the whole board accessible to

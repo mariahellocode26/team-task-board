@@ -10,9 +10,11 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status as http_status
+from sqlalchemy.orm import Session
 
+from app.database import get_session
 from app.models import Error, Task, TaskCreate, TaskMove, TaskUpdate
-from app.store import TaskStore, store
+from app.store import TaskStore
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -24,12 +26,15 @@ VALIDATION_ERROR = {400: {"model": Error, "description": "The request body faile
 NOT_FOUND = {404: {"model": Error, "description": "No task exists with that id."}}
 
 
-def get_store() -> TaskStore:
-    """FastAPI dependency, so tests can override it with an isolated store
-    via app.dependency_overrides instead of touching the shared singleton.
+def get_store(session: Session = Depends(get_session)) -> TaskStore:
+    """FastAPI dependency: one TaskStore per request, wrapping one Session.
+
+    Tests override this directly (via app.dependency_overrides) with a
+    TaskStore built on their own isolated in-memory database, bypassing
+    get_session and the app's real database entirely.
     """
 
-    return store
+    return TaskStore(session)
 
 
 StoreDep = Annotated[TaskStore, Depends(get_store)]

@@ -16,38 +16,64 @@ The full product specification is in [docs/specs.md](docs/specs.md).
 ## Layout
 
 | Path                         | What it is                                |
-| ---------------------------- | ----------------------------------------- |
-| [frontend/](frontend/)       | The web application — built and working   |
-| [backend/](backend/)         | The backend and its tests — not started   |
-| [docs/](docs/)               | Specification and supporting documents    |
-| [openapi.yaml](openapi.yaml) | The API agreement — empty placeholder     |
-| [AGENTS.md](AGENTS.md)       | Instructions for coding agents            |
+| ---------------------------- | ------------------------------------------ |
+| [frontend/](frontend/)       | The web application — built and working    |
+| [backend/](backend/)         | FastAPI + SQLAlchemy backend — built and working |
+| [docs/](docs/)               | Specification and supporting documents     |
+| [openapi.yaml](openapi.yaml) | The API agreement, implemented by both sides |
+| [AGENTS.md](AGENTS.md)       | Instructions for coding agents             |
 
 Each application owns its own dependencies; there is no root `package.json`.
 
-## Running the frontend
+## Running it locally
 
-TanStack Start + React 19 + Vite, Tailwind CSS v4 and shadcn/ui, managed with
-[bun](https://bun.sh).
+```sh
+# terminal 1 — backend, http://localhost:8000 (docs at /docs)
+cd backend
+pip install -e ".[dev]"
+make dev
+
+# terminal 2 — frontend, http://localhost:8080
+cd frontend
+npm install   # or: bun install
+npm run dev   # or: bun run dev
+```
+
+The frontend talks to the backend by default (`VITE_API_BASE_URL` defaults to
+`http://localhost:8000`; see [frontend/.env.example](frontend/.env.example)).
+The backend defaults to a local SQLite file (`DATABASE_URL`; see
+[backend/.env.example](backend/.env.example)), seeded with sample tasks on
+first run, and now persists across restarts.
+
+## Testing
+
+```sh
+cd backend
+make test   # or: pytest — 23 tests, each against its own isolated in-memory DB
+```
 
 ```sh
 cd frontend
-bun install
-bun run dev
+npx tsc --noEmit   # type-check
+npm run lint       # eslint
+npm run build      # production build
 ```
 
-Other scripts: `bun run build`, `bun run lint`, `bun run format`.
+There's no frontend test suite yet — verification so far has been type-checking,
+linting, building, and manual/scripted checks against the running backend.
 
 ## Status
 
-The frontend is complete against the MVP spec and persists the board to browser
-storage through a `TaskStore` interface, so the UI has no dependency on how tasks
-are stored. The backend is the next step: it should arrive as a second
-`TaskStore` implementation behind that same interface.
+Both applications are built and wired together: the frontend's `httpTaskStore`
+talks to the backend over HTTP per [openapi.yaml](openapi.yaml), which the
+backend implements with FastAPI and a SQLAlchemy-managed database (SQLite by
+default, database-agnostic by design — see [backend/README.md](backend/README.md)
+for what that means concretely). There's no authentication, matching
+docs/specs.md's explicit MVP scope.
 
-Before the backend can be built, three decisions are outstanding — the stack, the
-real-time transport, and how reordering is expressed over the wire. They are
-written up in [AGENTS.md](AGENTS.md).
+Still open: real-time collaboration (docs/specs.md §14) doesn't have a
+transport yet — SSE, WebSocket, and polling are all still on the table. See
+[AGENTS.md](AGENTS.md) for details.
 
 ---
 

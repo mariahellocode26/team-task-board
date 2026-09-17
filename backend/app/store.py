@@ -1,163 +1,169 @@
-"""In-memory task store.
+"""Database-backed task store.
 
 This plays the role docs/specs.md §16-17 assigns to a storage layer: a
-concern kept separate from the HTTP routing so it can later be swapped for
-a real database without changing the API contract. Data lives only in
-process memory and resets whenever the server restarts.
+concern kept separate from the HTTP routing so it can be swapped — first
+from in-memory to SQLite, later from SQLite to something else — without
+changing the API contract. One TaskStore wraps one request-scoped
+SQLAlchemy Session (see app/database.py's get_session); there is only one
+board (docs/specs.md §3.1), so there is no board-id to key queries on.
 
-The ordering rules below intentionally mirror the frontend's own
-localStorage-backed implementation in frontend/src/hooks/use-board.ts, so
-that a task's manually-chosen position (specs.md §12.2) behaves the same
-way regardless of which store is behind the API.
+Every query here goes through SQLAlchemy's ORM/Core expression API rather
+than raw SQL, and every column type in app/orm.py is a plain, portable one
+— nothing in this file assumes SQLite. The ordering rules below
+intentionally mirror the frontend's own localStorage-backed implementation
+in frontend/src/hooks/use-board.ts, so that a task's manually-chosen
+position (specs.md §12.2) behaves the same way regardless of which store —
+or which database — is behind the API.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field, replace
-from threading import Lock
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.models import Priority, Status, Task, TaskCreate, TaskMove, TaskUpdate
+from app.orm import TaskRow
 
 
-@dataclass
-class _Record:
-    """Internal representation; identical shape to Task but mutable."""
-
-    id: str
-    title: str
-    priority: Priority
-    status: Status
-    order: int
-    description: str | None = None
-    assignee: str | None = None
-    dueDate: str | None = None
-
-    def to_task(self) -> Task:
-        return Task(
-            id=self.id,
-            title=self.title,
-            description=self.description,
-            assignee=self.assignee,
-            priority=self.priority,
-            dueDate=self.dueDate,
-            status=self.status,
-            order=self.order,
-        )
+def _to_task(row: TaskRow) -> Task:
+    return Task(
+        id=row.id,
+        title=row.title,
+        description=row.description,
+        assignee=row.assignee,
+        priority=Priority(row.priority),
+        dueDate=row.due_date,
+        status=Status(row.status),
+        order=row.order,
+    )
 
 
-def _seed_records() -> list[_Record]:
+def seed_rows() -> list[TaskRow]:
     """Sample data so the frontend has something to show immediately.
 
     Deliberately the same four tasks the frontend's own localStorage seed
     (frontend/src/lib/kanban.ts seedTasks) uses, so the board looks
     identical whether it's reading from browser storage or this API.
+    Returns fresh ORM instances on every call, since a row object is tied
+    to whichever session it gets added to.
     """
 
     return [
-        _Record(
+        TaskRow(
             id="t1",
             title="Draft onboarding checklist",
             description="Outline the first-week steps for new teammates.",
             assignee="Maria",
-            priority=Priority.HIGH,
-            dueDate="2026-09-18",
-            status=Status.TODO,
+            priority=Priority.HIGH.value,
+            due_date="2026-09-18",
+            status=Status.TODO.value,
             order=0,
         ),
-        _Record(
+        TaskRow(
             id="t2",
             title="Collect feedback from pilot users",
             description="Summarise the five interviews into key themes.",
             assignee="Sam",
-            priority=Priority.MEDIUM,
-            status=Status.TODO,
+            priority=Priority.MEDIUM.value,
+            status=Status.TODO.value,
             order=1,
         ),
-        _Record(
+        TaskRow(
             id="t3",
             title="Rework board empty states",
             description="Make them quieter and more helpful.",
             assignee="Ines",
-            priority=Priority.LOW,
-            status=Status.IN_PROGRESS,
+            priority=Priority.LOW.value,
+            status=Status.IN_PROGRESS.value,
             order=0,
         ),
-        _Record(
+        TaskRow(
             id="t4",
             title="Ship weekly release notes",
             description="Publish the summary to the team channel.",
             assignee="Theo",
-            priority=Priority.MEDIUM,
-            dueDate="2026-09-12",
-            status=Status.DONE,
+            priority=Priority.MEDIUM.value,
+            due_date="2026-09-12",
+            status=Status.DONE.value,
             order=0,
         ),
     ]
 
 
+def seed_if_empty(session: Session) -> None:
+    """Populate the tasks table on first run only. Called on app startup;
+    a restart against a database that already has data is a no-op."""
+
+    count = session.execute(select(func.count()).select_from(TaskRow)).scalar_one()
+    if count == 0:
+        session.add_all(seed_rows())
+        session.commit()
+
+
 class TaskStore:
-    """Thread-safe in-memory store for the board's tasks.
+    """Operations the API needs, implemented against one Session."""
 
-    One instance backs the whole shared board (docs/specs.md §3.1 — there
-    is only ever one board), so every operation is serialized through a
-    single lock rather than partitioned per-board or per-user.
-    """
-
-    def __init__(self, *, seed: bool = True) -> None:
-        self._lock = Lock()
-        self._tasks: dict[str, _Record] = {}
-        if seed:
-            for record in _seed_records():
-                self._tasks[record.id] = record
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
     def list_tasks(self) -> list[Task]:
-        with self._lock:
-            return [r.to_task() for r in self._tasks.values()]
+        rows = self._session.execute(select(TaskRow)).scalars().all()
+        return [_to_task(r) for r in rows]
 
     def get_task(self, task_id: str) -> Task | None:
-        with self._lock:
-            record = self._tasks.get(task_id)
-            return record.to_task() if record else None
+        row = self._session.get(TaskRow, task_id)
+        return _to_task(row) if row else None
 
     def create_task(self, payload: TaskCreate) -> Task:
-        with self._lock:
-            order = self._next_order(payload.status)
-            record = _Record(
-                id=str(uuid.uuid4()),
-                title=payload.title,
-                description=payload.description,
-                assignee=payload.assignee,
-                priority=payload.priority,
-                dueDate=payload.dueDate,
-                status=payload.status,
-                order=order,
-            )
-            self._tasks[record.id] = record
-            return record.to_task()
+        row = TaskRow(
+            id=str(uuid.uuid4()),
+            title=payload.title,
+            description=payload.description,
+            assignee=payload.assignee,
+            priority=payload.priority.value,
+            due_date=payload.dueDate,
+            status=payload.status.value,
+            order=self._next_order(payload.status.value),
+        )
+        self._session.add(row)
+        self._session.commit()
+        return _to_task(row)
 
     def update_task(self, task_id: str, payload: TaskUpdate) -> Task | None:
-        with self._lock:
-            record = self._tasks.get(task_id)
-            if record is None:
-                return None
+        row = self._session.get(TaskRow, task_id)
+        if row is None:
+            return None
 
-            changes = payload.model_dump(exclude_unset=True)
-            status_changed = "status" in changes and changes["status"] != record.status
+        changes = payload.model_dump(exclude_unset=True)
+        new_status = changes.get("status")
+        status_changed = new_status is not None and new_status.value != row.status
 
-            updated = replace(record, **changes)
-            if status_changed:
-                # Same rule useBoard's upsertTask() uses: a task whose
-                # column changed goes to the end of the new column rather
-                # than keeping a position from the old one.
-                updated.order = self._next_order(updated.status, exclude_id=task_id)
+        for field, value in changes.items():
+            if field == "dueDate":
+                row.due_date = value
+            elif field in ("priority", "status"):
+                setattr(row, field, value.value)
+            else:
+                setattr(row, field, value)
 
-            self._tasks[task_id] = updated
-            return updated.to_task()
+        if status_changed:
+            # Same rule useBoard's upsertTask() uses: a task whose column
+            # changed goes to the end of the new column rather than
+            # keeping a position from the old one.
+            row.order = self._next_order(row.status, exclude_id=task_id)
+
+        self._session.commit()
+        return _to_task(row)
 
     def delete_task(self, task_id: str) -> bool:
-        with self._lock:
-            return self._tasks.pop(task_id, None) is not None
+        row = self._session.get(TaskRow, task_id)
+        if row is None:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
 
     def move_task(self, task_id: str, payload: TaskMove) -> list[Task] | None:
         """Move `task_id` into `payload.status` at `payload.index`.
@@ -168,37 +174,36 @@ class TaskStore:
         their existing order values, gaps and all.
         """
 
-        with self._lock:
-            moving = self._tasks.get(task_id)
-            if moving is None:
-                return None
+        moving = self._session.get(TaskRow, task_id)
+        if moving is None:
+            return None
 
-            column = sorted(
-                (r for r in self._tasks.values() if r.status == payload.status and r.id != task_id),
-                key=lambda r: r.order,
+        target_status = payload.status.value
+        column = list(
+            self._session.execute(
+                select(TaskRow)
+                .where(TaskRow.status == target_status, TaskRow.id != task_id)
+                .order_by(TaskRow.order)
             )
-            clamped = max(0, min(payload.index, len(column)))
-            column.insert(clamped, replace(moving, status=payload.status))
+            .scalars()
+            .all()
+        )
+        clamped = max(0, min(payload.index, len(column)))
+        column.insert(clamped, moving)
+        moving.status = target_status
 
-            for position, record in enumerate(column):
-                record.order = position
-                self._tasks[record.id] = record
+        for position, row in enumerate(column):
+            row.order = position
 
-            return [r.to_task() for r in self._tasks.values()]
+        self._session.commit()
+        return self.list_tasks()
 
-    def _next_order(self, status: Status, *, exclude_id: str | None = None) -> int:
+    def _next_order(self, status: str, *, exclude_id: str | None = None) -> int:
         """One past the highest existing order in `status`, or 0 if empty —
         the same append-to-end rule use-board.ts's upsertTask() uses."""
 
-        orders = [
-            r.order
-            for r in self._tasks.values()
-            if r.status == status and r.id != exclude_id
-        ]
-        return max(orders, default=-1) + 1
-
-
-# A single store instance shared by the whole process — there is only one
-# board (docs/specs.md §3.1), so there is no per-request or per-board state
-# to keep separate.
-store = TaskStore()
+        stmt = select(func.max(TaskRow.order)).where(TaskRow.status == status)
+        if exclude_id is not None:
+            stmt = stmt.where(TaskRow.id != exclude_id)
+        highest = self._session.execute(stmt).scalar_one_or_none()
+        return (highest if highest is not None else -1) + 1

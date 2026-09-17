@@ -18,7 +18,7 @@ authority on what is in and out of scope, and it is deliberately restrictive.
 ## Repository layout
 
 ```
-/backend       backend application and its tests   (FastAPI, in-memory store)
+/backend       backend application and its tests   (FastAPI, SQLAlchemy, SQLite by default)
 /docs          supporting documentation
 /frontend      frontend application                 (built, working)
 AGENTS.md      this file
@@ -98,21 +98,30 @@ switched from `localStorage` to HTTP.
 
 ## Backend
 
-FastAPI, implementing [openapi.yaml](openapi.yaml). Storage is in-memory and
-seeded with sample data on startup — see [backend/README.md](backend/README.md)
-for the full design notes.
+FastAPI, implementing [openapi.yaml](openapi.yaml). Storage is a database via
+SQLAlchemy — SQLite by default, configured by the `DATABASE_URL` environment
+variable — seeded with sample data on first run only. See
+[backend/README.md](backend/README.md) for the full design notes, including
+exactly what keeps this database-agnostic for adding Postgres later.
 
 ```sh
 cd backend
 pip install -e ".[dev]"
 uvicorn app.main:app --reload   # docs at /docs, schema at /openapi.json
+DATABASE_URL=... uvicorn app.main:app --reload   # point at a different database
 pytest
 ```
 
-Layout: `app/main.py` (app + error-shape normalization), `app/models.py`
-(Pydantic schemas mirroring openapi.yaml's components), `app/store.py` (the
-`TaskStore`, kept separate from routing so it can become a real database
-later), `app/routers/tasks.py` (the endpoints). Tests live in `backend/tests/`.
+Layout: `app/main.py` (lifespan: create tables + seed if empty; router wiring;
+error-shape normalization), `app/models.py` (Pydantic schemas mirroring
+openapi.yaml's components), `app/database.py` (SQLAlchemy engine/session,
+`DATABASE_URL`, the one SQLite-specific branch), `app/orm.py` (the `TaskRow`
+table model), `app/store.py` (`TaskStore`, wrapping a `Session`, kept separate
+from routing), `app/routers/tasks.py` (the endpoints). Tests live in
+`backend/tests/`, each against its own isolated in-memory SQLite database.
+
+Data now survives a server restart — it didn't with the earlier in-memory
+version. The default SQLite file (`team_kanban.db`) is gitignored.
 
 **No authentication.** Every endpoint has `security: []`, matching
 docs/specs.md §5.2/§33, which explicitly exclude accounts, logins and
